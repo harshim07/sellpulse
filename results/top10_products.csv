@@ -1,12 +1,11 @@
-
-rank,product_name,units_sold
-1,Wireless Headphones,1842
-2,Smart Watch,1560
-3,Laptop Stand,1304
-4,USB-C Hub,1048
-5,Mechanical Keyboard,986
-6,Bluetooth Speaker,872
-7,Webcam,764
-8,Portable SSD,693
-9,Wireless Mouse,612
-10,Phone Charger,548
+rank,product_name,units_sold	
+1,Wireless Headphones,5526	
+2,Smart Watch,4680	
+3,Laptop Stand,3912	
+4,USB-C Hub,3144	
+5,Mechanical Keyboard,2958	
+6,Bluetooth Speaker,2616	
+7,Webcam,2292	
+8,Portable SSD,2079	
+9,Wireless Mouse,1836	
+10,Phone Charger,1644	

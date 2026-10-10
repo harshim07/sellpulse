@@ -1,9 +1,10 @@
+
 import json
 import os
 import time
+from decimal import Decimal, InvalidOperation
 from urllib.parse import quote
 
-import requests
 from hdfs import InsecureClient
 from kafka import KafkaConsumer
 from kafka.errors import KafkaError
@@ -15,78 +16,205 @@ GROUP_ID = os.getenv("KAFKA_GROUP_ID", "sales-hdfs-writer")
 HDFS_URL = os.getenv("HDFS_URL", "http://namenode:9870")
 HDFS_INPUT_DIR = os.getenv("HDFS_INPUT_DIR", "/sales/input")
 
+MAX_CONNECT_ATTEMPTS = 30
+MAX_HDFS_WRITE_ATTEMPTS = 3
+RETRY_DELAY_SECONDS = 2
+
+
+def connect_hdfs():
+    """Connect to HDFS and make sure the input directory exists."""
+    client = InsecureClient(HDFS_URL, user="root")
+
+    for attempt in range(1, MAX_CONNECT_ATTEMPTS + 1):
+        try:
+            client.makedirs(HDFS_INPUT_DIR)
+            print("HDFS input directory ready: {}".format(HDFS_INPUT_DIR))
+            return client
+        except Exception as error:
+            print(
+                "HDFS connection attempt {}/{} failed: {}".format(
+                    attempt, MAX_CONNECT_ATTEMPTS, error
+                )
+            )
+            if attempt == MAX_CONNECT_ATTEMPTS:
+                raise
+            time.sleep(RETRY_DELAY_SECONDS)
+
+    raise RuntimeError("Could not connect to HDFS.")
+
 
 def connect_kafka():
-    for attempt in range(30):
+    """Create a Kafka consumer with automatic commits disabled."""
+    for attempt in range(1, MAX_CONNECT_ATTEMPTS + 1):
         try:
-            return KafkaConsumer(
+            consumer = KafkaConsumer(
                 TOPIC,
                 bootstrap_servers=BOOTSTRAP_SERVERS,
                 group_id=GROUP_ID,
                 enable_auto_commit=False,
                 auto_offset_reset="earliest",
-                value_deserializer=lambda value: json.loads(value.decode("utf-8")),
             )
-        except KafkaError:
-            if attempt == 29:
+            print("Connected to Kafka topic: {}".format(TOPIC))
+            print("Consumer group: {}".format(GROUP_ID))
+            return consumer
+        except KafkaError as error:
+            print(
+                "Kafka connection attempt {}/{} failed: {}".format(
+                    attempt, MAX_CONNECT_ATTEMPTS, error
+                )
+            )
+            if attempt == MAX_CONNECT_ATTEMPTS:
                 raise
-            time.sleep(2)
-    raise RuntimeError("Kafka consumer connection attempts ended unexpectedly.")
+            time.sleep(RETRY_DELAY_SECONDS)
+
+    raise RuntimeError("Could not create Kafka consumer.")
 
 
-def connect_hdfs():
-    client = InsecureClient(HDFS_URL, user="root")
-    for attempt in range(60):
+def validate_transaction(message_value):
+    """Decode and validate the transaction sent by the producer."""
+    try:
+        transaction = json.loads(message_value.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("Message is not valid UTF-8 JSON: {}".format(error))
+
+    if not isinstance(transaction, dict):
+        raise ValueError("Kafka message must contain a JSON object.")
+
+    product_value = transaction.get("product_name")
+    units_value = transaction.get("units_sold")
+
+    if not isinstance(product_value, str):
+        raise ValueError("product_name must be text.")
+
+    product = product_value.strip()
+
+    if not product:
+        raise ValueError("product_name cannot be empty.")
+
+    if any(char in product for char in ("\t", "\n", "\r")):
+        raise ValueError("product_name cannot contain tabs or line breaks.")
+
+    if units_value is None or isinstance(units_value, bool):
+        raise ValueError("units_sold must be a whole number.")
+
+    try:
+        units_decimal = Decimal(str(units_value))
+    except (InvalidOperation, ValueError):
+        raise ValueError("units_sold must be a valid number.")
+
+    if (
+        not units_decimal.is_finite()
+        or units_decimal < 0
+        or units_decimal != units_decimal.to_integral_value()
+    ):
+        raise ValueError("units_sold must be a non-negative whole number.")
+
+    # Preserve transaction_id, sold_at, and any other original fields.
+    transaction["product_name"] = product
+    transaction["units_sold"] = int(units_decimal)
+
+    return transaction
+
+
+def save_to_hdfs(hdfs, transaction, topic, partition, offset):
+    """Write one transaction file, retrying temporary HDFS failures."""
+    filename = "{}-{}-{}.json".format(
+        quote(topic, safe=""),
+        partition,
+        offset,
+    )
+    path = "{}/{}".format(HDFS_INPUT_DIR.rstrip("/"), filename)
+    last_error = None
+
+    for attempt in range(1, MAX_HDFS_WRITE_ATTEMPTS + 1):
         try:
-            client.makedirs(HDFS_INPUT_DIR)
-            return client
-        except requests.exceptions.RequestException:
-            if attempt == 59:
-                raise
-            time.sleep(2)
-    raise RuntimeError("HDFS connection attempts ended unexpectedly.")
+            with hdfs.write(
+                path,
+                encoding="utf-8",
+                overwrite=True,
+            ) as output:
+                output.write(
+                    json.dumps(transaction, ensure_ascii=False) + "\n"
+                )
+
+            print("Saved {} to HDFS.".format(filename))
+            return
+
+        except Exception as error:
+            last_error = error
+            print(
+                "HDFS write attempt {}/{} failed for {}: {}".format(
+                    attempt,
+                    MAX_HDFS_WRITE_ATTEMPTS,
+                    filename,
+                    error,
+                )
+            )
+
+            if attempt < MAX_HDFS_WRITE_ATTEMPTS:
+                time.sleep(RETRY_DELAY_SECONDS)
+
+    # Raising an error here prevents the valid message from being committed.
+    raise RuntimeError(
+        "Failed to save {} after {} attempts: {}".format(
+            filename, MAX_HDFS_WRITE_ATTEMPTS, last_error
+        )
+    )
 
 
 def main():
     hdfs = connect_hdfs()
     consumer = connect_kafka()
-    print("Consuming '{}' and writing transaction files to HDFS.".format(TOPIC))
+
+    saved_count = 0
+    invalid_count = 0
+
+    print("Consumer is running. Press Ctrl+C to stop.")
 
     try:
         for message in consumer:
-            transaction = message.value
-            if not isinstance(transaction, dict):
-                raise ValueError("Kafka message must contain a JSON object.")
-            product = str(transaction.get("product_name", "")).strip()
             try:
-                units = int(transaction["units_sold"])
-            except (KeyError, TypeError, ValueError) as error:
-                raise ValueError(
-                    "Invalid transaction at Kafka offset {}.".format(message.offset)
-                ) from error
-            if not product or units < 0 or "\t" in product or "\n" in product:
-                raise ValueError(
-                    "Invalid transaction at Kafka offset {}.".format(message.offset)
+                transaction = validate_transaction(message.value)
+
+            except ValueError as error:
+                print(
+                    "Skipping invalid message at partition {}, offset {}: {}"
+                    .format(message.partition, message.offset, error)
                 )
 
-            filename = (
-                "{}-{}-{}.json".format(
-                    quote(message.topic, safe=""),
-                    message.partition,
-                    message.offset,
-                )
+                # This record is intentionally rejected. Commit its offset
+                # so the same invalid record is not processed forever.
+                consumer.commit()
+                invalid_count += 1
+                continue
+
+            # Save first. Commit only after HDFS confirms the write.
+            save_to_hdfs(
+                hdfs,
+                transaction,
+                message.topic,
+                message.partition,
+                message.offset,
             )
-            path = "{}/{}".format(HDFS_INPUT_DIR.rstrip("/"), filename)
-            with hdfs.write(path, encoding="utf-8", overwrite=True) as output:
-                transaction["product_name"] = product
-                transaction["units_sold"] = units
-                json.dump(transaction, output, ensure_ascii=False)
-                output.write("\n")
 
             consumer.commit()
-            print("Saved {} to HDFS.".format(filename))
+            saved_count += 1
+
+            print(
+                "Progress: saved={}, invalid_skipped={}".format(
+                    saved_count, invalid_count
+                )
+            )
+
+    except KeyboardInterrupt:
+        print("\nStop requested.")
+
     finally:
         consumer.close()
+        print(
+            "Consumer closed. Saved {} record(s); skipped {} invalid "
+            "record(s) in this run.".format(saved_count, invalid_count)
+        )
 
 
 if __name__ == "__main__":
