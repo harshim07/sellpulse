@@ -29,3 +29,13 @@ at [http://localhost:9870](http://localhost:9870).
 Stop the services with `Ctrl+C` or `docker compose down`. Kafka and HDFS data
 persist in Docker volumes; `docker compose down -v` removes those volumes and
 their data.
+
+## Member 3: MapReduce ranking
+
+HDFS input is one transaction JSON object per line. The mapper emits
+tab-separated product and unit pairs; the reducer aggregates products and
+outputs CSV columns `rank,product_name,units_sold`, ranked by units sold
+descending with product names alphabetically breaking ties. Run the automated
+tests with `python -m unittest discover -s tests -v`. See
+[MEMBER3_MAPREDUCE_GUIDE.md](MEMBER3_MAPREDUCE_GUIDE.md) for the data contract,
+implementation, testing, and Hadoop Streaming details.

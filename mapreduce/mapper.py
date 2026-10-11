@@ -6,10 +6,22 @@ import sys
 for line_number, line in enumerate(sys.stdin, start=1):
     try:
         transaction = json.loads(line)
-        product = str(transaction["product_name"]).strip()
-        units = int(transaction["units_sold"])
-        if not product or units < 0 or "\t" in product or "\n" in product:
-            raise ValueError("invalid product or quantity")
+        if not isinstance(transaction, dict):
+            raise ValueError("transaction must be a JSON object")
+
+        product_value = transaction["product_name"]
+        units = transaction["units_sold"]
+        if not isinstance(product_value, str):
+            raise ValueError("product_name must be text")
+        product = product_value.strip()
+        if not product:
+            raise ValueError("product_name cannot be empty")
+        if any(char in product for char in ("\t", "\n", "\r")):
+            raise ValueError("product_name cannot contain tabs or line breaks")
+        if isinstance(units, bool) or not isinstance(units, int):
+            raise ValueError("units_sold must be an integer")
+        if units < 0:
+            raise ValueError("units_sold cannot be negative")
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
         print(
             "Invalid HDFS transaction on input line {}: {}".format(
