@@ -26,9 +26,8 @@ The current pipeline is wired as follows:
 4. The scheduler copies the reducer part file to
    `results/top10_products.csv`.
 
-Docker Compose runs Kafka, HDFS, and the pipeline image. The dashboard is not
-part of the current Compose setup; it reads the generated results CSV when run
-separately.
+Docker Compose runs Kafka, HDFS, the pipeline, and dashboard. The pipeline
+waits for the CSV transactions to reach HDFS before the first ranking run.
 
 ## Input Contract: HDFS JSON Lines
 

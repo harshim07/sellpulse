@@ -1,4 +1,4 @@
-FROM bde2020/hadoop-base:2.0.0-hadoop3.2.1-java8
+FROM bde2020/hadoop-base:2.0.0-hadoop3.2.1-java8 AS pipeline
 
 USER root
 RUN sed -i \
@@ -16,7 +16,11 @@ RUN python3 -m venv /opt/pipeline-venv
 ENV PATH=/opt/pipeline-venv/bin:$PATH
 
 COPY pipeline-requirements.txt ./pipeline-requirements.txt
-RUN pip install --no-cache-dir -r pipeline-requirements.txt
+RUN if grep -Eiq '^(streamlit|pandas|plotly)([<=>~! ]|$)' ./pipeline-requirements.txt; then \
+        echo "Dashboard packages belong in dashboard/requirements.txt, not pipeline-requirements.txt." >&2; \
+        exit 1; \
+    fi \
+    && python3 -m pip install --no-cache-dir -r pipeline-requirements.txt
 
 COPY producer ./producer
 COPY consumer ./consumer
@@ -32,3 +36,20 @@ ENV HADOOP_HOME=/opt/hadoop-3.2.1 \
     HDFS_INPUT_DIR=/sales/input \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
+
+FROM python:3.12-slim AS dashboard
+
+WORKDIR /app
+
+COPY dashboard/requirements.txt ./dashboard/requirements.txt
+RUN python -m pip install --no-cache-dir -r dashboard/requirements.txt
+COPY dashboard/app.py ./dashboard/app.py
+
+ENV PYTHONUNBUFFERED=1 \
+    STREAMLIT_SERVER_ADDRESS=0.0.0.0 \
+    STREAMLIT_SERVER_PORT=8501 \
+    STREAMLIT_SERVER_HEADLESS=true
+
+EXPOSE 8501
+
+CMD ["streamlit", "run", "/app/dashboard/app.py"]

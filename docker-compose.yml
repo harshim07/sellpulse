@@ -39,6 +39,12 @@ services:
       - "9870:9870"
     volumes:
       - namenode-data:/hadoop/dfs/name
+    healthcheck:
+      test: ["CMD-SHELL", "hdfs dfs -ls / >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 60s
     restart: unless-stopped
 
   datanode:
@@ -48,16 +54,27 @@ services:
       CORE_CONF_fs_defaultFS: hdfs://namenode:9000
       HDFS_CONF_dfs_replication: 1
     depends_on:
-      - namenode
+      namenode:
+        condition: service_healthy
     volumes:
       - datanode-data:/hadoop/dfs/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - hdfs dfsadmin -report 2>/dev/null | grep -q 'Live datanodes (1)'
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 60s
     restart: unless-stopped
 
   pipeline:
     build:
       context: .
       dockerfile: Dockerfile
+      target: pipeline
     command: ["/bin/bash", "/app/scheduler/run-pipeline.sh"]
+    init: true
     environment:
       CORE_CONF_fs_defaultFS: hdfs://namenode:9000
       MAPRED_CONF_mapreduce_framework_name: local
@@ -67,17 +84,38 @@ services:
       HDFS_URL: http://namenode:9870
       HDFS_INPUT_DIR: /sales/input
       HADOOP_HOME: /opt/hadoop-3.2.1
-      SCHEDULER_INTERVAL_SECONDS: 60
+      SCHEDULER_INTERVAL_SECONDS: ${SCHEDULER_INTERVAL_SECONDS:-600}
     depends_on:
       kafka:
         condition: service_healthy
       namenode:
-        condition: service_started
+        condition: service_healthy
       datanode:
-        condition: service_started
+        condition: service_healthy
     volumes:
       - ./data:/app/data:ro
       - ./results:/app/results
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dashboard
+    ports:
+      - "${DASHBOARD_PORT:-8502}:8501"
+    volumes:
+      - ./results:/app/results:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=5)"
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
 
 volumes:
