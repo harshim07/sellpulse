@@ -2,5 +2,4 @@
 streamlit
 pandas
 plotly
-hdfs==2.7.3
-kafka-python==2.0.2
+streamlit-autorefresh>=1.0.1,<2

@@ -3,6 +3,7 @@ from pathlib import Path
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 # ==================================================
 # PAGE CONFIGURATION
@@ -13,6 +14,8 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+st_autorefresh(interval=10 * 60 * 1000, key="dashboard_refresh")
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT_FILE = ROOT / "results" / "top10_products.csv"
